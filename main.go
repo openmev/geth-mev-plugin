@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"github.com/ethereum/go-ethereum/miner"
-	"sync"
 )
 
 func PluginConstructor(cfg *map[string]interface{}) (miner.Collator, miner.CollatorAPI, error) {
@@ -28,8 +27,7 @@ func PluginConstructor(cfg *map[string]interface{}) (miner.Collator, miner.Colla
 
 	collator := MevCollator{
 		maxMergedBundles: maxMergedBundles,
-		bundleMu:         sync.Mutex{},
-		bundles:          []MevBundle{},
+		bestProfit: big.NewInt(0),
 	}
 
 	api := NewMevCollatorAPI(&collator)

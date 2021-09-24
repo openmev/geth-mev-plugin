@@ -5,16 +5,17 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+	"time"
 	"fmt"
+	"context"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
-	"github.com/ethereum/go-ethereum/params"
 )
 
-const (
+var (
 	errInterrupted = errors.New("work-cycle interrupted by miner: new head block received")
 )
 
@@ -409,7 +410,7 @@ func (c *MevCollator) collateBlock(work miner.BlockCollatorWork) {
 	c.workers[0].newWorkCh <- bundlerWork{work: work, simulatedBundles: nil}
 
 	if len(bundles) > 0 {
-		simulatedBundles := make([]simulatedBundle, len(bundles))
+		var bundleBlocksExpected uint
 		if len(bundles) > int(c.maxMergedBundles) {
 			bundleBlocksExpected = c.maxMergedBundles
 		} else {
@@ -432,6 +433,20 @@ func (c *MevCollator) CollateBlock(bs BlockState, pool Pool) {
 }
 
 func (c *MevCollator) CollateBlocks(miner MinerState, pool Pool, blockCh <-chan BlockCollatorWork, exitCh <-chan struct{}) {
+	c.pool = pool
+	for i := 0; i < int(c.maxMergedBundles); i++ {
+		worker := bundleWorker{
+			collator: c,
+			exitCh:           c.closeCh,
+			newWorkCh:        make(chan bundlerWork),
+			maxMergedBundles: uint(i),
+			id:               i,
+		}
+
+		c.workers = append(c.workers, worker)
+		go worker.workerMainLoop()
+	}
+
 	for {
 		select {
 		case work := blockCh:
@@ -441,24 +456,4 @@ func (c *MevCollator) CollateBlocks(miner MinerState, pool Pool, blockCh <-chan 
 			// TODO close all workers
 		}
 	}
-}
-
-func (c *MevCollator) Start(pool miner.Pool) {
-	c.pool = pool
-	for i := 0; i < int(c.maxMergedBundles); i++ {
-		worker := bundleWorker{
-			exitCh:           c.closeCh,
-			newWorkCh:        make(chan bundlerWork),
-			maxMergedBundles: uint(i),
-			pool:             pool,
-			id:               i,
-		}
-
-		c.workers = append(c.workers, worker)
-		go worker.workerMainLoop()
-	}
-}
-
-func (c *MevCollator) Close() {
-	close(c.closeCh)
 }
