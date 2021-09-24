@@ -14,6 +14,10 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+const (
+	errInterrupted = errors.New("work-cycle interrupted by miner: new head block received")
+)
+
 type MevCollator struct {
 	maxMergedBundles uint
 	bundleMu         sync.Mutex
@@ -21,6 +25,11 @@ type MevCollator struct {
 	workers          []bundleWorker
 	pool             miner.Pool
 	exitCh chan struct{}
+
+	commitMu sync.Mutex
+	// these values are used per-work-cycle
+	lastParentHash common.Hash
+	bestProfit *big.Int
 }
 
 type MevBundle struct {
@@ -40,13 +49,8 @@ type simulatedBundle struct {
 }
 
 type bundlerWork struct {
-	blockState       miner.BlockState
-	wg               *sync.WaitGroup
+	work miner.BlockCollatorWork
 	simulatedBundles []simulatedBundle
-	maxMergedBundles uint
-	commitMu         *sync.Mutex
-	bestProfit       *big.Int
-	context		context.Context
 }
 
 type bundleWorker struct {
@@ -363,7 +367,7 @@ func (w *bundleWorker) workerMainLoop() {
 	}
 }
 
-func simulateBundles(bs miner.BlockState, b []MevBundle, pendingTxs map[common.Address]types.Transactions, locals []common.Address) ([]simulatedBundle, error) {
+func simulateBundles(work miner.BlockCollatorWork, b []MevBundle, pendingTxs map[common.Address]types.Transactions, locals []common.Address) ([]simulatedBundle, error) {
 	result := []simulatedBundle{}
 
 	if len(b) == 0 {
@@ -376,7 +380,7 @@ func simulateBundles(bs miner.BlockState, b []MevBundle, pendingTxs map[common.A
 		simulated, err := computeBundleGas(bundle, bsBefore, pendingTxs)
 		bsBefore = bs.Copy()
 		if err != nil {
-			if errors.Is(miner.ErrInterruptRecommit, err) || errors.Is(miner.ErrInterruptNewHead, err) {
+			if errors.Is(errInterrupted, err) {
 				return nil, err
 			} else {
 				log.Error("failed to simulate bndle", "err", err)
