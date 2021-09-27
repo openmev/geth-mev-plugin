@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/miner"
+	"github.com/ethereum/go-ethereum/miner/collator"
 )
 
 var (
@@ -22,7 +22,7 @@ type MevCollator struct {
 	bundleMu         sync.Mutex
 	bundles          []MevBundle
 	workers          []bundleWorker
-	pool             miner.Pool
+	pool             collator.Pool
 
 	commitMu sync.Mutex
 	// these values are used per-work-cycle
@@ -54,7 +54,7 @@ type MergedBundlesStats struct {
 }
 
 type bundleWork struct {
-	work    miner.BlockCollatorWork
+	work    collator.BlockCollatorWork
 	bundles []MevBundle
 }
 
@@ -112,7 +112,7 @@ func (c *MevCollator) eligibleBundles(blockNumber *big.Int, blockTimestamp uint6
 	return ret
 }
 
-func applyBundle(ctx context.Context, bundle MevBundle, bs miner.BlockState, pendingTxs map[common.Address]types.Transactions) (*simulatedBundle, error) {
+func applyBundle(ctx context.Context, bundle MevBundle, bs collator.BlockState, pendingTxs map[common.Address]types.Transactions) (*simulatedBundle, error) {
 	state := bs.State()
 	header := bs.Header()
 	signer := bs.Signer()
@@ -270,7 +270,7 @@ func (w *bundleWorker) bundleWorkMainLoop() {
 			}
 
 			// TODO add tx-fees to profit
-			miner.FillTransactions(work.work.Ctx, work.work.Block, nil, pendingTxs, locals)
+			collator.FillTransactions(work.work.Ctx, work.work.Block, nil, pendingTxs, locals)
 
 			header := work.work.Block.Header()
 
@@ -292,7 +292,7 @@ func (w *bundleWorker) bundleWorkMainLoop() {
 	}
 }
 
-func simulateBundles(work miner.BlockCollatorWork, b []MevBundle, pendingTxs map[common.Address]types.Transactions, locals []common.Address) ([]simulatedBundle, error) {
+func simulateBundles(work collator.BlockCollatorWork, b []MevBundle, pendingTxs map[common.Address]types.Transactions, locals []common.Address) ([]simulatedBundle, error) {
 	result := []simulatedBundle{}
 
 	if len(b) == 0 {
@@ -316,7 +316,7 @@ func simulateBundles(work miner.BlockCollatorWork, b []MevBundle, pendingTxs map
 	return result, nil
 }
 
-func (c *MevCollator) collateBlock(work miner.BlockCollatorWork) {
+func (c *MevCollator) collateBlock(work collator.BlockCollatorWork) {
 	header := work.Block.Header()
 	bundles := c.eligibleBundles(header.Number, header.Time)
 
@@ -333,16 +333,16 @@ func (c *MevCollator) collateBlock(work miner.BlockCollatorWork) {
 		}
 
 		for i := 0; i < int(bundleBlocksExpected); i++ {
-			c.workers[i+1].newWorkCh <- &bundleWork{work: miner.BlockCollatorWork{Block: blockCopy.Copy(), Ctx: work.Ctx}, bundles: bundles}
+			c.workers[i+1].newWorkCh <- &bundleWork{work: collator.BlockCollatorWork{Block: blockCopy.Copy(), Ctx: work.Ctx}, bundles: bundles}
 		}
 	}
 }
 
-func (c *MevCollator) CollateBlock(bs miner.BlockState, pool miner.Pool) {
+func (c *MevCollator) CollateBlock(bs collator.BlockState, pool collator.Pool) {
 	panic("pls implement me")
 }
 
-func (c *MevCollator) CollateBlocks(miner miner.MinerState, pool miner.Pool, blockCh <-chan miner.BlockCollatorWork, exitCh <-chan struct{}) {
+func (c *MevCollator) CollateBlocks(miner collator.MinerState, pool collator.Pool, blockCh <-chan collator.BlockCollatorWork, exitCh <-chan struct{}) {
 	c.pool = pool
 	for i := 0; i < int(c.maxMergedBundles); i++ {
 		worker := bundleWorker{
