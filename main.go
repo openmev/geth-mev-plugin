@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/miner"
@@ -26,10 +27,12 @@ func PluginConstructor(cfg *map[string]interface{}) (miner.Collator, miner.Colla
 	// TODO some sanity check to make sure maxMergedBundles is a reasonable value
 
 	maxMergedBundles := (uint)(mmb)
+	fmt.Println("plugin constructor")
+	fmt.Println(maxMergedBundles)
 
 	collator := MevCollator{
 		maxMergedBundles: maxMergedBundles,
-		bestProfit: big.NewInt(0),
+		bestProfit:       big.NewInt(0),
 	}
 
 	api := NewMevCollatorAPI(&collator)

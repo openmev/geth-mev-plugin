@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,6 +26,7 @@ type SendBundleArgs struct {
 }
 
 func (api *ApiImpl) SendBundle(ctx context.Context, args SendBundleArgs) error {
+	fmt.Println("SendBundle")
 	var txs types.Transactions
 	if len(args.Txs) == 0 {
 		return errors.New("bundle missing txs")
@@ -40,6 +42,8 @@ func (api *ApiImpl) SendBundle(ctx context.Context, args SendBundleArgs) error {
 		}
 		txs = append(txs, tx)
 	}
+
+	fmt.Println("SendBundle 2")
 
 	var minTimestamp, maxTimestamp uint64
 	if args.MinTimestamp != nil {

@@ -1,13 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"math/big"
 	"sort"
 	"sync"
-	"time"
-	"fmt"
-	"context"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -29,7 +27,7 @@ type MevCollator struct {
 	commitMu sync.Mutex
 	// these values are used per-work-cycle
 	lastParentHash common.Hash
-	bestProfit *big.Int
+	bestProfit     *big.Int
 }
 
 type MevBundle struct {
@@ -49,14 +47,14 @@ type simulatedBundle struct {
 }
 
 type MergedBundlesStats struct {
-	numTxs uint
+	numTxs     uint
 	numBundles uint
-	totalEth *big.Int
-	profit *big.Int
+	totalEth   *big.Int
+	profit     *big.Int
 }
 
 type bundleWork struct {
-	work miner.BlockCollatorWork
+	work    miner.BlockCollatorWork
 	bundles []MevBundle
 }
 
@@ -64,7 +62,7 @@ type bundleWorker struct {
 	id               int
 	newWorkCh        chan *bundleWork
 	maxMergedBundles uint
-	collator *MevCollator
+	collator         *MevCollator
 }
 
 func containsHash(arr []common.Hash, match common.Hash) bool {
@@ -78,7 +76,7 @@ func containsHash(arr []common.Hash, match common.Hash) bool {
 
 var (
 	ErrBundleTxReverted = errors.New("bundle tx was reverted (not in allowed reverted list)")
-	ErrBundleTxFailed = errors.New("failed to apply tx from bundle")
+	ErrBundleTxFailed   = errors.New("failed to apply tx from bundle")
 )
 
 // eligibleBundles returns a list of bundles valid for the given blockNumber/blockTimestamp
@@ -131,15 +129,15 @@ func applyBundle(ctx context.Context, bundle MevBundle, bs miner.BlockState, pen
 		}
 
 		coinbaseBalanceBefore := state.GetBalance(bs.Etherbase())
-		err, receipts := bs.AddTransactions(types.Transactions{tx})
+		receipt, err := bs.AddTransaction(tx)
 		if err != nil {
 			return nil, ErrBundleTxFailed
 		}
 
-		if receipts[0].Status == types.ReceiptStatusFailed && !containsHash(bundle.RevertingTxHashes, receipts[0].TxHash) {
+		if receipt.Status == types.ReceiptStatusFailed && !containsHash(bundle.RevertingTxHashes, receipt.TxHash) {
 			return nil, ErrBundleTxReverted
 		}
-		totalGasUsed += receipts[0].GasUsed
+		totalGasUsed += receipt.GasUsed
 
 		from, err := types.Sender(signer, tx)
 		if err != nil {
@@ -157,7 +155,7 @@ func applyBundle(ctx context.Context, bundle MevBundle, bs miner.BlockState, pen
 				}
 			}
 		}
-		gasUsed := new(big.Int).SetUint64(receipts[0].GasUsed)
+		gasUsed := new(big.Int).SetUint64(receipt.GasUsed)
 		gasPrice, err := tx.EffectiveGasTip(header.BaseFee)
 		if err != nil {
 			return nil, err
@@ -188,7 +186,7 @@ func applyBundle(ctx context.Context, bundle MevBundle, bs miner.BlockState, pen
 func mergeBundles(work bundleWork, simulatedBundles []simulatedBundle, pendingTxs map[common.Address]types.Transactions, locals []common.Address, maxMergedBundles uint) (*MergedBundlesStats, error) {
 	result := &MergedBundlesStats{
 		totalEth: big.NewInt(0),
-		profit: big.NewInt(0),
+		profit:   big.NewInt(0),
 	}
 
 	if len(simulatedBundles) == 0 {
@@ -205,16 +203,17 @@ func mergeBundles(work bundleWork, simulatedBundles []simulatedBundle, pendingTx
 		floorGasPrice := new(big.Int).Mul(bundle.mevGasPrice, big.NewInt(99))
 		floorGasPrice = floorGasPrice.Div(floorGasPrice, big.NewInt(100))
 
+		blockCopy := work.work.Block.Copy()
 		simmed, err := applyBundle(work.work.Ctx, bundle.originalBundle, work.work.Block, pendingTxs)
 		if err != nil {
 			if errors.Is(err, errInterrupted) {
 				return nil, err
 			} else {
-				work.work.Block.RevertTransactions(uint(len(bundle.originalBundle.Transactions)))
+				work.work.Block = blockCopy
 				continue
 			}
 		} else if simmed.mevGasPrice.Cmp(floorGasPrice) <= 0 {
-			work.work.Block.RevertTransactions(uint(len(bundle.originalBundle.Transactions)))
+			work.work.Block = blockCopy
 			continue
 		}
 
@@ -222,110 +221,14 @@ func mergeBundles(work bundleWork, simulatedBundles []simulatedBundle, pendingTx
 
 		totalEth.Add(totalEth, simmed.totalEth)
 		ethSentToCoinbase.Add(ethSentToCoinbase, simmed.ethSentToCoinbase)
-		numMergedBundles++
+		result.numBundles++
+		result.numTxs += uint(len(bundle.originalBundle.Transactions))
 		if numMergedBundles >= maxMergedBundles {
 			break
 		}
 	}
 
 	return result, nil
-}
-
-func submitTransactions(ctx context.Context, bs miner.BlockState, txs *types.TransactionsByPriceAndNonce, timer *time.Timer) bool {
-	header := bs.Header()
-	availableGas := header.GasLimit
-	for {
-		select {
-		case <-ctx.Done():
-			return true
-		default:
-		}
-
-		if timer != nil {
-			select {
-			case <-timer.C:
-				return false
-			default:
-			}
-		}
-
-		// Retrieve the next transaction and abort if all done
-		tx := txs.Peek()
-		if tx == nil {
-			break
-		}
-		// Enough space for this tx?
-		if availableGas < tx.Gas() {
-			txs.Pop()
-			continue
-		}
-		from, _ := types.Sender(bs.Signer(), tx)
-
-		err, receipts := bs.AddTransactions(types.Transactions{tx})
-		switch {
-		case errors.Is(err, miner.ErrGasLimitReached):
-			// Pop the current out-of-gas transaction without shifting in the next from the account
-			log.Trace("Gas limit exceeded for current block", "sender", from)
-			txs.Pop()
-
-		case errors.Is(err, miner.ErrNonceTooLow):
-			// New head notification data race between the transaction pool and miner, shift
-			log.Trace("Skipping transaction with low nonce", "sender", from, "nonce", tx.Nonce())
-			txs.Shift()
-
-		case errors.Is(err, miner.ErrNonceTooHigh):
-			// Reorg notification data race between the transaction pool and miner, skip account =
-			log.Trace("Skipping account with high nonce", "sender", from, "nonce", tx.Nonce())
-			txs.Pop()
-
-		case errors.Is(err, nil):
-			availableGas = header.GasLimit - receipts[0].CumulativeGasUsed
-			// Everything ok, collect the logs and shift in the next transaction from the same account
-			txs.Shift()
-
-		case errors.Is(err, miner.ErrTxTypeNotSupported):
-			// Pop the unsupported transaction without shifting in the next from the account
-			log.Trace("Skipping unsupported transaction type", "sender", from, "type", tx.Type())
-			txs.Pop()
-		default:
-			// Strange error, discard the transaction and get the next in line (note, the
-			// nonce-too-high clause will prevent us from executing in vain).
-			log.Debug("Transaction failed, account skipped", "hash", tx.Hash(), "err", err)
-			txs.Shift()
-		}
-	}
-
-	return false
-}
-
-func (c *bundleWorker) fillTransactions(ctx context.Context, bs miner.BlockState, timer *time.Timer) {
-        header := bs.Header()
-        txs, err := c.collator.pool.Pending(true)
-        if err != nil {
-                log.Error("could not get pending transactions from the pool", "err", err)
-                return
-        }
-        if len(txs) == 0 {
-                return
-        }
-        // Split the pending transactions into locals and remotes
-        localTxs, remoteTxs := make(map[common.Address]types.Transactions), txs
-        for _, account := range c.collator.pool.Locals() {
-                if accountTxs := remoteTxs[account]; len(accountTxs) > 0 {
-                        delete(remoteTxs, account)
-                        localTxs[account] = accountTxs
-                }
-        }
-        if len(localTxs) > 0 {
-                if submitTransactions(ctx, bs, types.NewTransactionsByPriceAndNonce(bs.Signer(), localTxs, header.BaseFee), timer) {
-                        return
-                }
-        }
-        if len(remoteTxs) > 0 {
-                if submitTransactions(ctx, bs, types.NewTransactionsByPriceAndNonce(bs.Signer(), remoteTxs, header.BaseFee), timer) {
-                        return
-                }
-        }
 }
 
 func (w *bundleWorker) bundleWorkMainLoop() {
@@ -344,6 +247,7 @@ func (w *bundleWorker) bundleWorkMainLoop() {
 			if err != nil {
 				continue
 			}
+
 			sort.SliceStable(simulatedBundles, func(i, j int) bool {
 				return simulatedBundles[j].mevGasPrice.Cmp(simulatedBundles[i].mevGasPrice) < 0
 			})
@@ -368,17 +272,16 @@ func (w *bundleWorker) bundleWorkMainLoop() {
 			// TODO add tx-fees to profit
 			miner.FillTransactions(work.work.Ctx, work.work.Block, nil, pendingTxs, locals)
 
-			log.Info(fmt.Sprintf("%d: evaluating block", w.id))
-
 			header := work.work.Block.Header()
 
 			w.collator.commitMu.Lock()
 
 			// don't commit if the block is stale or the task doesn't increase profit
-			if mergedBundlesStats.profit.Cmp(w.collator.bestProfit) < 0 || w.collator.lastParentHash != header.ParentHash {
+			if mergedBundlesStats.profit.Cmp(w.collator.bestProfit) < 0 && w.collator.lastParentHash != header.ParentHash {
 				w.collator.commitMu.Unlock()
 				continue
 			}
+
 			if work.work.Block.Commit() {
 				w.collator.bestProfit.Set(mergedBundlesStats.profit)
 				w.collator.lastParentHash = header.ParentHash
@@ -397,7 +300,8 @@ func simulateBundles(work miner.BlockCollatorWork, b []MevBundle, pendingTxs map
 	}
 
 	for _, bundle := range b {
-		simulated, err := applyBundle(work.Ctx, bundle, work.Block, pendingTxs)
+		blockCopy := work.Block.Copy()
+		simulated, err := applyBundle(work.Ctx, bundle, blockCopy, pendingTxs)
 		if err != nil {
 			if errors.Is(errInterrupted, err) {
 				return nil, err
@@ -407,7 +311,6 @@ func simulateBundles(work miner.BlockCollatorWork, b []MevBundle, pendingTxs map
 			}
 		} else {
 			result = append(result, *simulated)
-			work.Block.RevertTransactions(uint(len(simulated.originalBundle.Transactions)))
 		}
 	}
 	return result, nil
@@ -429,10 +332,9 @@ func (c *MevCollator) collateBlock(work miner.BlockCollatorWork) {
 			bundleBlocksExpected = uint(len(bundles))
 		}
 
-		for i := 1; i < int(bundleBlocksExpected) - 1; i++ {
-			c.workers[i].newWorkCh <- &bundleWork{work: miner.BlockCollatorWork{Block: blockCopy.Copy(), Ctx: work.Ctx},  bundles: bundles}
+		for i := 0; i < int(bundleBlocksExpected); i++ {
+			c.workers[i+1].newWorkCh <- &bundleWork{work: miner.BlockCollatorWork{Block: blockCopy.Copy(), Ctx: work.Ctx}, bundles: bundles}
 		}
-		c.workers[bundleBlocksExpected - 1].newWorkCh <- &bundleWork{work: miner.BlockCollatorWork{Block: blockCopy, Ctx: work.Ctx},  bundles: bundles}
 	}
 }
 
@@ -444,7 +346,7 @@ func (c *MevCollator) CollateBlocks(miner miner.MinerState, pool miner.Pool, blo
 	c.pool = pool
 	for i := 0; i < int(c.maxMergedBundles); i++ {
 		worker := bundleWorker{
-			collator: c,
+			collator:         c,
 			newWorkCh:        make(chan *bundleWork),
 			maxMergedBundles: uint(i),
 			id:               i,
